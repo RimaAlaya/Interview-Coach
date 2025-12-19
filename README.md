@@ -263,24 +263,7 @@ Each dimension is scored 0-10 based on:
 - Transferable skills
 - Career progression logic
 
-## 📁 Project Structure
 
-```
-interview-coach-advanced/
-├── myapp.py                    # Main application
-├── requirements.txt            # Python dependencies
-├── README.md                   # This file
-├── checkpoints/                # Saved interview progress
-│   └── checkpoint_*.json
-├── interview_history/          # Completed interviews
-│   └── interview_*.json
-├── examples/                   # Example files
-│   ├── example_resume.pdf
-│   └── example_job_description.txt
-└── docs/
-    ├── CONTRIBUTING.md
-    └── API_REFERENCE.md
-```
 
 ## 🔧 Configuration
 
@@ -364,9 +347,6 @@ Process multiple candidates:
 python myapp.py --batch candidates.csv
 ```
 
-## 🤝 Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](docs/CONTRIBUTING.md)
 
 ### Development Setup
 ```bash
@@ -391,9 +371,6 @@ pytest tests/
 - [ ] Analytics dashboard
 - [ ] Browser extension
 
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
@@ -403,12 +380,7 @@ MIT License - see [LICENSE](LICENSE) file
 - **Hugging Face** for emotion models
 - **Gradio** for UI framework
 
-## 📧 Contact
 
-**Your Name**
-- LinkedIn: [your-profile](https://linkedin.com/in/yourprofile)
-- GitHub: [@yourusername](https://github.com/yourusername)
-- Email: your.email@example.com
 
 ## ⭐ Star History
 

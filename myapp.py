@@ -13,7 +13,7 @@ from collections import Counter
 # ============================================
 # SETUP - Replace with your Groq API key
 # ============================================
-GROQ_API_KEY = "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"  # ⚠️ CHANGE THIS!
+GROQ_API_KEY = "gsk_your_actual_key_here"  # ⚠️ CHANGE THIS!
 
 # Initialize Groq client
 groq_client = Groq(api_key=GROQ_API_KEY)
