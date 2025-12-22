@@ -13,7 +13,7 @@ from collections import Counter
 # ============================================
 # SETUP - Replace with your Groq API key
 # ============================================
-GROQ_API_KEY = "gsk_your_actual_key_here"  # ⚠️ CHANGE THIS!
+GROQ_API_KEY = "YOUR_GROQ_API_KEY_HERE"  # ⚠️ CHANGE THIS!
 
 # Initialize Groq client
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -525,16 +525,16 @@ def Score_Interview(chat_histories, job_summary, interview_type):
     Job Requirements:
     {job_summary}
 
-    Format:
-    {
-    "technical_skills": X,
-        "communication": X,
-        "problem_solving": X,
-        "cultural_fit": X,
-        "experience_relevance": X,
-        "overall": X,
+    Format (use this exact structure):
+    {{
+        "technical_skills": number,
+        "communication": number,
+        "problem_solving": number,
+        "cultural_fit": number,
+        "experience_relevance": number,
+        "overall": number,
         "justification": "Brief explanation"
-    }
+    }}
     """
 
     response = llm_base.chat(
@@ -584,6 +584,17 @@ def Score_Interview(chat_histories, job_summary, interview_type):
 def next_question(resume_path, job_str, total_number, interview_type, difficulty, company_style,
                   practice_mode, question_previous="", answer_previous=None, video_input=None):
     global chat_histories, interview_step, resume_summary, job_summary, feedback_history
+
+    # Validate inputs
+    if resume_path is None:
+        error_msg = "⚠️ Please upload a resume PDF before starting the interview!"
+        return gr.update(value=None), gr.update(value=None), gr.update(value="Start Interview"), gr.update(
+            value=error_msg)
+
+    if not job_str or job_str.strip() == "":
+        error_msg = "⚠️ Please paste a job description before starting the interview!"
+        return gr.update(value=None), gr.update(value=None), gr.update(value="Start Interview"), gr.update(
+            value=error_msg)
 
     # Generate summaries (first time only)
     if resume_summary is None:
@@ -729,13 +740,14 @@ def next_question(resume_path, job_str, total_number, interview_type, difficulty
 # GRADIO UI (Enhanced)
 # ============================================
 
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+with gr.Blocks() as demo:
     gr.Markdown("# 🎯 Advanced AI Interview Coach")
     gr.Markdown("### Powered by Groq + Advanced NLP Analysis ⚡")
 
     with gr.Tabs():
         with gr.TabItem("🎤 Interview"):
             gr.Markdown('## Step 1: Upload Resume & Job Description')
+            gr.Markdown('⚠️ **Both are required before starting!**')
 
             with gr.Row():
                 resume_input = gr.File(label="📄 Upload Resume (PDF)", type='filepath')
@@ -800,7 +812,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("## 📊 Performance Feedback")
             evaluation_textbox = gr.Textbox(label="Real-time Feedback & Final Evaluation",
-                                            lines=25, show_copy_button=True)
+                                            lines=25)
 
             # Hidden state to pass previous question
             question_state = gr.State("")
