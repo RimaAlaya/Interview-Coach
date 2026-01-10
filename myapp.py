@@ -10,15 +10,18 @@ from transformers import pipeline
 import re
 from collections import Counter
 
+# Import RAG system
+from rag_system import get_rag_system
+
 # ============================================
 # SETUP - Replace with your Groq API key
 # ============================================
-GROQ_API_KEY = "YOUR_GROQ_API_KEY_HERE"  # ⚠️ CHANGE THIS!
+GROQ_API_KEY = "put your api here"  # ⚠️ CHANGE THIS!
 
 # Initialize Groq client
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Initialize sentiment analysis (for emotion detection)
+# Initialize sentiment analysis
 try:
     sentiment_analyzer = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
     emotion_detector = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base")
@@ -27,8 +30,10 @@ except Exception as e:
     sentiment_analyzer = None
     emotion_detector = None
 
+# Initialize RAG system (will load on first use)
+rag_system = None
 
-# Wrapper to match IBM Watsonx interface
+
 class LLMWrapper:
     def __init__(self, client):
         self.client = client
@@ -58,6 +63,8 @@ resume_summary = None
 job_summary = None
 feedback_history = []
 checkpoint_data = {}
+selected_questions = []  # Store RAG-selected questions
+current_question_index = 0
 
 # ============================================
 # INTERVIEW CONFIGURATIONS
@@ -66,66 +73,45 @@ checkpoint_data = {}
 INTERVIEW_TYPES = {
     "behavioral": {
         "description": "Focus on past experiences and behavioral patterns using STAR method",
-        "system_prompt": "You are an expert behavioral interviewer. Focus on situational questions that reveal how candidates handled past challenges. Ask about specific situations, tasks, actions, and results."
+        "system_prompt": "You are an expert behavioral interviewer. Focus on situational questions that reveal how candidates handled past challenges."
     },
     "technical": {
         "description": "Focus on technical skills, problem-solving, and domain knowledge",
-        "system_prompt": "You are a technical interviewer. Focus on technical competencies, problem-solving approaches, system design, and hands-on experience with technologies."
+        "system_prompt": "You are a technical interviewer. Focus on technical competencies, problem-solving approaches, and hands-on experience."
     },
     "leadership": {
         "description": "Focus on management skills, team leadership, and decision-making",
-        "system_prompt": "You are a senior leadership interviewer. Focus on management experience, team leadership, conflict resolution, strategic thinking, and decision-making abilities."
+        "system_prompt": "You are a senior leadership interviewer. Focus on management experience, team leadership, and strategic thinking."
     },
     "case_study": {
         "description": "Focus on analytical thinking and business problem-solving",
-        "system_prompt": "You are a case interview expert. Present business scenarios and assess analytical thinking, problem-solving frameworks, and structured reasoning."
+        "system_prompt": "You are a case interview expert. Present business scenarios and assess analytical thinking and structured reasoning."
     }
 }
 
 DIFFICULTY_LEVELS = {
     "junior": {
         "description": "Entry-level questions (0-2 years experience)",
-        "modifier": "Ask basic, foundational questions suitable for candidates with 0-2 years of experience. Focus on fundamental concepts and eagerness to learn."
+        "modifier": "Ask basic, foundational questions suitable for candidates with 0-2 years of experience."
     },
     "mid": {
         "description": "Intermediate questions (3-5 years experience)",
-        "modifier": "Ask intermediate questions suitable for candidates with 3-5 years of experience. Expect practical experience and ability to work independently."
+        "modifier": "Ask intermediate questions suitable for candidates with 3-5 years of experience."
     },
     "senior": {
         "description": "Advanced questions (5+ years experience)",
-        "modifier": "Ask advanced questions suitable for candidates with 5+ years of experience. Expect strategic thinking, leadership, and expertise in complex problem-solving."
+        "modifier": "Ask advanced questions suitable for candidates with 5+ years of experience."
     }
 }
 
 COMPANY_STYLES = {
-    "google": {
-        "description": "Google-style: Algorithmic thinking, scalability, innovation",
-        "focus": "Focus on algorithmic thinking, system scalability, innovative solutions, and data-driven decision making. Emphasize googleyness and leadership qualities."
-    },
-    "amazon": {
-        "description": "Amazon-style: Leadership principles, customer obsession, ownership",
-        "focus": "Base questions on Amazon's 16 leadership principles. Focus on customer obsession, ownership, bias for action, and deliver results. Use STAR method extensively."
-    },
-    "microsoft": {
-        "description": "Microsoft-style: Collaboration, growth mindset, technical depth",
-        "focus": "Focus on growth mindset, collaboration, technical depth, and inclusive culture. Ask about learning from failures and working across teams."
-    },
-    "meta": {
-        "description": "Meta-style: Impact, moving fast, boldness",
-        "focus": "Focus on impact-driven work, moving fast, bold ideas, and being open. Ask about tackling ambiguous problems and shipping products quickly."
-    },
-    "consulting": {
-        "description": "Consulting-style: Case studies, frameworks, structured thinking",
-        "focus": "Present business cases and assess structured problem-solving, framework usage, quantitative analysis, and clear communication of recommendations."
-    },
-    "startup": {
-        "description": "Startup-style: Versatility, ownership, scrappiness",
-        "focus": "Focus on wearing multiple hats, ownership mentality, resourcefulness with constraints, adaptability, and building from zero to one."
-    },
-    "general": {
-        "description": "General corporate interview style",
-        "focus": "Standard professional interview approach covering skills, experience, and cultural fit."
-    }
+    "google": {"description": "Google-style: Algorithmic thinking, scalability, innovation"},
+    "amazon": {"description": "Amazon-style: Leadership principles, customer obsession"},
+    "microsoft": {"description": "Microsoft-style: Collaboration, growth mindset"},
+    "meta": {"description": "Meta-style: Impact, moving fast, boldness"},
+    "consulting": {"description": "Consulting-style: Case studies, frameworks"},
+    "startup": {"description": "Startup-style: Versatility, ownership, scrappiness"},
+    "general": {"description": "General corporate interview style"}
 }
 
 
@@ -153,7 +139,6 @@ def text_to_speech_file(text_input):
 def transcribe_audio_faster_whisper(audio_file_path: str, model_size: str = "base") -> str:
     if audio_file_path is None:
         return ""
-
     try:
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
         segments, info = model.transcribe(audio_file_path, beam_size=5)
@@ -164,7 +149,6 @@ def transcribe_audio_faster_whisper(audio_file_path: str, model_size: str = "bas
 
 
 def get_audio_duration(audio_file_path):
-    """Get duration of audio file in seconds"""
     try:
         import wave
         with wave.open(audio_file_path, 'rb') as audio_file:
@@ -177,21 +161,17 @@ def get_audio_duration(audio_file_path):
 
 
 def analyze_speech_quality(audio_file_path, transcript):
-    """Analyze speech quality: filler words, pace, pauses"""
     if not transcript:
         return {}
 
-    # Count filler words
-    fillers = ['um', 'uh', 'like', 'you know', 'basically', 'actually', 'literally', 'kind of', 'sort of']
+    fillers = ['um', 'uh', 'like', 'you know', 'basically', 'actually', 'literally']
     transcript_lower = transcript.lower()
     filler_count = sum(transcript_lower.count(filler) for filler in fillers)
 
-    # Calculate speaking rate
     duration = get_audio_duration(audio_file_path) if audio_file_path else 0
     word_count = len(transcript.split())
     words_per_minute = (word_count / (duration / 60)) if duration > 0 else 0
 
-    # Determine pace
     if words_per_minute < 100:
         pace = "too slow"
     elif words_per_minute > 180:
@@ -199,7 +179,6 @@ def analyze_speech_quality(audio_file_path, transcript):
     else:
         pace = "good"
 
-    # Analyze sentence structure
     sentences = [s.strip() for s in transcript.split('.') if s.strip()]
     avg_sentence_length = sum(len(s.split()) for s in sentences) / len(sentences) if sentences else 0
 
@@ -214,12 +193,11 @@ def analyze_speech_quality(audio_file_path, transcript):
 
 
 def analyze_answer_emotion(answer_text):
-    """Analyze emotion and sentiment of answer"""
     if not answer_text or not sentiment_analyzer or not emotion_detector:
         return {"confidence": "N/A", "emotion": "N/A", "feedback": ""}
 
     try:
-        sentiment = sentiment_analyzer(answer_text[:512])[0]  # Limit text length
+        sentiment = sentiment_analyzer(answer_text[:512])[0]
         emotion = emotion_detector(answer_text[:512])[0]
 
         confidence_level = "confident" if sentiment['score'] > 0.7 else "somewhat uncertain"
@@ -228,7 +206,7 @@ def analyze_answer_emotion(answer_text):
         if sentiment['label'] == 'NEGATIVE':
             feedback = "Try to frame your experiences more positively."
         if emotion['label'] in ['fear', 'sadness']:
-            feedback += " Your tone seems hesitant. Speak with more confidence."
+            feedback += " Speak with more confidence."
 
         return {
             "confidence": confidence_level,
@@ -241,8 +219,7 @@ def analyze_answer_emotion(answer_text):
 
 
 def save_checkpoint():
-    """Save current interview state"""
-    global chat_histories, interview_step, resume_summary, job_summary, feedback_history
+    global chat_histories, interview_step, resume_summary, job_summary, feedback_history, selected_questions
 
     checkpoint = {
         "chat_histories": chat_histories,
@@ -250,6 +227,7 @@ def save_checkpoint():
         "resume_summary": resume_summary,
         "job_summary": job_summary,
         "feedback_history": feedback_history,
+        "selected_questions": selected_questions,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -263,8 +241,7 @@ def save_checkpoint():
 
 
 def load_checkpoint(checkpoint_file):
-    """Load interview state from checkpoint"""
-    global chat_histories, interview_step, resume_summary, job_summary, feedback_history
+    global chat_histories, interview_step, resume_summary, job_summary, feedback_history, selected_questions
 
     try:
         with open(checkpoint_file.name, 'r') as f:
@@ -275,53 +252,33 @@ def load_checkpoint(checkpoint_file):
         resume_summary = checkpoint["resume_summary"]
         job_summary = checkpoint["job_summary"]
         feedback_history = checkpoint.get("feedback_history", [])
+        selected_questions = checkpoint.get("selected_questions", [])
 
         return "✅ Interview loaded successfully!"
     except Exception as e:
         return f"❌ Error loading checkpoint: {e}"
 
 
-def save_interview_history(chat_histories, evaluation, scores, resume_name, job_title):
-    """Save complete interview to history"""
-    os.makedirs("interview_history", exist_ok=True)
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"interview_history/interview_{timestamp}.json"
-
-    history = {
-        "timestamp": datetime.now().isoformat(),
-        "candidate": resume_name or "Unknown",
-        "position": job_title or "Unknown",
-        "questions_answers": chat_histories,
-        "evaluation": evaluation,
-        "scores": scores,
-        "total_questions": len(chat_histories)
-    }
-
-    with open(filename, 'w') as f:
-        json.dump(history, f, indent=2)
-
-    return filename
-
-
 # ============================================
-# AI AGENTS (Enhanced)
+# AI AGENTS WITH RAG
 # ============================================
 
 def Resume_Analyst(resume):
     prompt = f"""
-    Write a detailed REPORT on the candidate in exactly three paragraphs:
-
-    1. Candidate's background (name if available, education, years of experience)
-    2. Key technical and soft skills
-    3. Summary of past experiences and achievements
+    Analyze this resume and extract:
+    1. Key technical skills (list them clearly)
+    2. Years of experience
+    3. Main areas of expertise
+    4. Notable achievements
 
     Resume:
     {resume}
+
+    Be specific about skills for matching with job requirements.
     """
     response = llm_base.chat(
         messages=[
-            {"role": "system", "content": "You are an HR expert in reviewing resumes."},
+            {"role": "system", "content": "You are an HR expert. Extract structured information."},
             {"role": "user", "content": prompt}
         ]
     )
@@ -330,10 +287,10 @@ def Resume_Analyst(resume):
 
 def Job_Description_Expert(job_description):
     prompt = f"""
-    Analyze this job description and provide:
-    1. Required technical skills
-    2. Required soft skills  
-    3. Preferred experience level
+    Analyze this job description and extract:
+    1. Required technical skills (list clearly)
+    2. Required soft skills
+    3. Experience level needed
     4. Key responsibilities
 
     Job Description:
@@ -348,110 +305,12 @@ def Job_Description_Expert(job_description):
     return response['choices'][0]['message']['content']
 
 
-def Interview_Question_Action(chat_histories, resume_summary, job_summary, interview_type, difficulty, company_style):
-    interview_context = INTERVIEW_TYPES[interview_type]["system_prompt"]
-    difficulty_context = DIFFICULTY_LEVELS[difficulty]["modifier"]
-    company_context = COMPANY_STYLES[company_style]["focus"]
-
-    prompt = f"""
-    Based on the interview history, resume, and job requirements, decide the next question action.
-
-    Interview Type: {interview_type}
-    Difficulty Level: {difficulty}
-    Company Style: {company_style}
-
-    Choose ONE action:
-    - Ask about a different skill or experience from the resume
-    - Ask a follow-up question to dig deeper into current topic
-    - Challenge the candidate with a harder question on same topic
-
-    Answer History:
-    {chat_histories}
-
-    Resume Summary:
-    {resume_summary}
-
-    Job Requirements:
-    {job_summary}
-
-    Context: {interview_context}
-    Difficulty: {difficulty_context}
-    Company Focus: {company_context}
-    """
-
-    response = llm_base.chat(
-        messages=[
-            {"role": "system", "content": "You are an interview strategy expert."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-    return response['choices'][0]['message']['content']
-
-
-def Interviewer(resume_summary, job_summary, interview_type, difficulty, company_style, action=None, last=False,
-                practice_mode=False):
-    interview_context = INTERVIEW_TYPES[interview_type]["system_prompt"]
-    difficulty_context = DIFFICULTY_LEVELS[difficulty]["modifier"]
-    company_context = COMPANY_STYLES[company_style]["focus"]
-
-    if not last:
-        if action is not None:
-            hint_instruction = "Also provide a brief hint about what makes a good answer." if practice_mode else ""
-
-            prompt = f"""
-            Generate ONE specific interview question based on:
-
-            Action: {action}
-            Resume: {resume_summary}
-            Job: {job_summary}
-
-            Interview Type: {interview_type}
-            {interview_context}
-
-            Difficulty: {difficulty}
-            {difficulty_context}
-
-            Company Style: {company_style}
-            {company_context}
-
-            {hint_instruction}
-
-            DO NOT explain why you're asking. Just ask the question directly.
-            """
-
-            response = llm_base.chat(
-                messages=[
-                    {"role": "system", "content": "You are an expert interviewer."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return response['choices'][0]['message']['content']
-        else:
-            return "Tell me about yourself and why you're interested in this position."
-    else:
-        prompt = f"""
-        The interview is ending. Provide a warm, professional closing statement.
-        Thank the candidate and mention what happens next.
-        Be CONCISE (2-3 sentences).
-
-        Candidate Background: {resume_summary[:200]}
-        """
-        response = llm_base.chat(
-            messages=[
-                {"role": "system", "content": "You are an expert interviewer."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response['choices'][0]['message']['content']
-
-
 def Real_Time_Feedback(answer_text, question_text, practice_mode=False):
-    """Provide immediate feedback on answer quality"""
     if not practice_mode or not answer_text:
         return ""
 
     prompt = f"""
-    Provide BRIEF feedback (2-3 sentences max) on this interview answer:
+    Provide BRIEF feedback (2-3 sentences) on this answer:
 
     Question: {question_text}
     Answer: {answer_text}
@@ -464,7 +323,7 @@ def Real_Time_Feedback(answer_text, question_text, practice_mode=False):
 
     response = llm_base.chat(
         messages=[
-            {"role": "system", "content": "You are an interview coach providing quick feedback."},
+            {"role": "system", "content": "You are an interview coach."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=200
@@ -474,19 +333,19 @@ def Real_Time_Feedback(answer_text, question_text, practice_mode=False):
 
 def Evaluator(chat_histories, job_summary, interview_type, difficulty):
     prompt = f"""
-    Evaluate this interview performance comprehensively:
+    Evaluate this interview comprehensively:
 
     Interview Type: {interview_type}
-    Difficulty Level: {difficulty}
+    Difficulty: {difficulty}
 
-    Provide evaluation with:
-    1. Overall Assessment (Strong Match/Good Match/Needs Improvement/Poor Match)
-    2. Strengths (3-4 specific points)
-    3. Areas for Improvement (3-4 specific points)
-    4. Specific Examples from their answers
+    Provide:
+    1. Overall Assessment
+    2. Strengths (3-4 points)
+    3. Areas for Improvement (3-4 points)
+    4. Specific Examples
     5. Recommendation
 
-    Questions & Answers:
+    Q&A:
     {chat_histories}
 
     Job Requirements:
@@ -504,28 +363,18 @@ def Evaluator(chat_histories, job_summary, interview_type, difficulty):
 
 
 def Score_Interview(chat_histories, job_summary, interview_type):
-    """Generate numerical scores for different competencies"""
     prompt = f"""
-    Score this interview on a scale of 0-10 for each category.
-    Return ONLY a JSON object, no other text.
+    Score this interview 0-10 for each category. Return ONLY JSON.
 
     Categories:
-    - technical_skills: Technical competency demonstrated
-    - communication: Clarity and articulation
-    - problem_solving: Analytical thinking and approach
-    - cultural_fit: Alignment with role requirements
-    - experience_relevance: How well experience matches job
-    - overall: Overall performance
+    - technical_skills
+    - communication
+    - problem_solving
+    - cultural_fit
+    - experience_relevance
+    - overall
 
-    Interview Type: {interview_type}
-
-    Answers:
-    {chat_histories}
-
-    Job Requirements:
-    {job_summary}
-
-    Format (use this exact structure):
+    Format:
     {{
         "technical_skills": number,
         "communication": number,
@@ -535,6 +384,12 @@ def Score_Interview(chat_histories, job_summary, interview_type):
         "overall": number,
         "justification": "Brief explanation"
     }}
+
+    Answers:
+    {chat_histories}
+
+    Job:
+    {job_summary}
     """
 
     response = llm_base.chat(
@@ -545,56 +400,45 @@ def Score_Interview(chat_histories, job_summary, interview_type):
     )
 
     try:
-        # Extract JSON from response
         content = response['choices'][0]['message']['content']
-        # Find JSON object in the response
         start = content.find('{')
         end = content.rfind('}') + 1
         if start != -1 and end != 0:
             json_str = content[start:end]
             scores = json.loads(json_str)
             return scores
-        else:
-            # Fallback scores
-            return {
-                "technical_skills": 7,
-                "communication": 7,
-                "problem_solving": 7,
-                "cultural_fit": 7,
-                "experience_relevance": 7,
-                "overall": 7,
-                "justification": "Unable to parse detailed scores"
-            }
     except:
-        return {
-            "technical_skills": 7,
-            "communication": 7,
-            "problem_solving": 7,
-            "cultural_fit": 7,
-            "experience_relevance": 7,
-            "overall": 7,
-            "justification": "Scoring error occurred"
-        }
+        pass
+
+    return {
+        "technical_skills": 7, "communication": 7, "problem_solving": 7,
+        "cultural_fit": 7, "experience_relevance": 7, "overall": 7,
+        "justification": "Scoring error occurred"
+    }
 
 
 # ============================================
-# CORE INTERVIEW ENGINE (Enhanced)
+# CORE INTERVIEW ENGINE WITH RAG
 # ============================================
 
-def next_question(resume_path, job_str, total_number, interview_type, difficulty, company_style,
-                  practice_mode, question_previous="", answer_previous=None, video_input=None):
-    global chat_histories, interview_step, resume_summary, job_summary, feedback_history
+def next_question(resume_path, job_str, total_number, interview_type, difficulty,
+                  company_style, practice_mode, question_previous="", answer_previous=None,
+                  video_input=None):
+    global chat_histories, interview_step, resume_summary, job_summary
+    global feedback_history, rag_system, selected_questions, current_question_index
 
     # Validate inputs
     if resume_path is None:
-        error_msg = "⚠️ Please upload a resume PDF before starting the interview!"
-        return gr.update(value=None), gr.update(value=None), gr.update(value="Start Interview"), gr.update(
-            value=error_msg)
+        return gr.update(value=None), gr.update(value=None), gr.update(value="Start Interview"), \
+            gr.update(value="⚠️ Please upload a resume PDF!")
 
     if not job_str or job_str.strip() == "":
-        error_msg = "⚠️ Please paste a job description before starting the interview!"
-        return gr.update(value=None), gr.update(value=None), gr.update(value="Start Interview"), gr.update(
-            value=error_msg)
+        return gr.update(value=None), gr.update(value=None), gr.update(value="Start Interview"), \
+            gr.update(value="⚠️ Please paste a job description!")
+
+    # Initialize RAG system (first time only)
+    if rag_system is None:
+        rag_system = get_rag_system()
 
     # Generate summaries (first time only)
     if resume_summary is None:
@@ -604,18 +448,28 @@ def next_question(resume_path, job_str, total_number, interview_type, difficulty
     if job_summary is None:
         job_summary = Job_Description_Expert(job_str)
 
-    # Transcribe user's answer
+    # Get RAG-selected questions (first time only)
+    if not selected_questions:
+        print("🎯 Using RAG to select relevant questions...")
+        resume_text = extract_text_from_pdf(resume_path)
+        selected_questions = rag_system.get_relevant_questions(
+            resume_text=resume_text,
+            job_description=job_str,
+            interview_type=interview_type,
+            difficulty=difficulty,
+            company_style=company_style,
+            num_questions=total_number
+        )
+        print(f"✅ Selected {len(selected_questions)} relevant questions")
+
+    # Transcribe answer
     answer_text = ""
     speech_analysis = {}
     emotion_analysis = {}
 
     if answer_previous:
         answer_text = transcribe_audio_faster_whisper(answer_previous)
-
-        # Analyze speech quality
         speech_analysis = analyze_speech_quality(answer_previous, answer_text)
-
-        # Analyze emotion
         emotion_analysis = analyze_answer_emotion(answer_text)
 
     # Update chat history
@@ -626,7 +480,7 @@ def next_question(resume_path, job_str, total_number, interview_type, difficulty
             "emotion_analysis": emotion_analysis
         }
 
-    # Get real-time feedback (practice mode only)
+    # Real-time feedback
     real_time_feedback = ""
     if interview_step > 0 and practice_mode and answer_text:
         real_time_feedback = Real_Time_Feedback(answer_text, question_previous, practice_mode)
@@ -637,21 +491,19 @@ def next_question(resume_path, job_str, total_number, interview_type, difficulty
             "emotion_analysis": emotion_analysis
         })
 
-    # Generate next question
+    # Get next question from RAG-selected list
     if interview_step < total_number:
-        if interview_step == 0:
-            action = None
-        else:
-            # Simplify chat history for action planner
-            chat_hist_str = "\n".join([f"Q: {k}\nA: {v['answer']}" for k, v in chat_histories.items()])
-            action = Interview_Question_Action(chat_hist_str, resume_summary, job_summary,
-                                               interview_type, difficulty, company_style)
+        if interview_step < len(selected_questions):
+            question_data = selected_questions[interview_step]
+            Question_next = question_data["question"]
 
-        Question_next = Interviewer(resume_summary, job_summary, interview_type, difficulty,
-                                    company_style, action, last=False, practice_mode=practice_mode)
+            # Add hint if practice mode
+            if practice_mode and question_data.get("hint"):
+                Question_next += f"\n\n💡 Hint: {question_data['hint']}"
+        else:
+            Question_next = "Tell me more about your experience."
     else:
-        Question_next = Interviewer(resume_summary, job_summary, interview_type, difficulty,
-                                    company_style, action=None, last=True)
+        Question_next = "Thank you for completing the interview. You'll receive detailed feedback shortly."
 
     # Build feedback display
     feedback_display = ""
@@ -661,30 +513,25 @@ def next_question(resume_path, job_str, total_number, interview_type, difficulty
     if speech_analysis:
         feedback_display += f"""
 ### 🎤 Speech Analysis
-- **Words per minute**: {speech_analysis.get('words_per_minute', 'N/A')} ({speech_analysis.get('pace', 'N/A')} pace)
+- **Pace**: {speech_analysis.get('words_per_minute', 'N/A')} wpm ({speech_analysis.get('pace', 'N/A')})
 - **Filler words**: {speech_analysis.get('filler_count', 0)}
-- **Answer length**: {speech_analysis.get('word_count', 0)} words
-- **Duration**: {speech_analysis.get('duration_seconds', 0)} seconds
+- **Length**: {speech_analysis.get('word_count', 0)} words ({speech_analysis.get('duration_seconds', 0)}s)
 """
 
     if emotion_analysis and emotion_analysis.get('confidence') != 'N/A':
         feedback_display += f"""
-### 😊 Emotion & Confidence
-- **Confidence Level**: {emotion_analysis.get('confidence', 'N/A')}
-- **Emotion Detected**: {emotion_analysis.get('emotion', 'N/A')}
+### 😊 Confidence & Emotion
+- **Confidence**: {emotion_analysis.get('confidence', 'N/A')}
+- **Emotion**: {emotion_analysis.get('emotion', 'N/A')}
 {emotion_analysis.get('feedback', '')}
 """
 
     # Evaluate if complete
     if interview_step >= total_number:
-        # Generate scores
         chat_hist_str = "\n".join([f"Q: {k}\nA: {v['answer']}" for k, v in chat_histories.items()])
         scores = Score_Interview(chat_hist_str, job_summary, interview_type)
-
-        # Generate evaluation
         evaluation = Evaluator(chat_hist_str, job_summary, interview_type, difficulty)
 
-        # Format scores display
         scores_display = f"""
 ## 📊 Your Scores
 
@@ -702,23 +549,23 @@ def next_question(resume_path, job_str, total_number, interview_type, difficulty
 ## 📝 Detailed Evaluation
 
 {evaluation}
+
+---
+
+## 🎯 Questions Asked (Selected by AI)
+
 """
+        for i, q in enumerate(selected_questions[:total_number], 1):
+            scores_display += f"{i}. **[{q['difficulty'].upper()}]** {q['question'][:100]}...\n"
 
-        # Save interview history
-        try:
-            filename = save_interview_history(chat_histories, evaluation, scores,
-                                              resume_path.name if resume_path else "Unknown",
-                                              "Position")
-            scores_display += f"\n\n✅ **Interview saved to**: {filename}"
-        except Exception as e:
-            scores_display += f"\n\n⚠️ Could not save interview: {e}"
-
-        # Reset for next interview
+        # Reset
         chat_histories = {}
         interview_step = 0
         resume_summary = None
         job_summary = None
         feedback_history = []
+        selected_questions = []
+        current_question_index = 0
 
         final_evaluation = scores_display
     else:
@@ -737,84 +584,64 @@ def next_question(resume_path, job_str, total_number, interview_type, difficulty
 
 
 # ============================================
-# GRADIO UI (Enhanced)
+# GRADIO UI
 # ============================================
 
-with gr.Blocks() as demo:
-    gr.Markdown("# 🎯 Advanced AI Interview Coach")
-    gr.Markdown("### Powered by Groq + Advanced NLP Analysis ⚡")
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🎯 AI Interview Coach with RAG")
+    gr.Markdown("### Powered by Groq + LangChain + Chroma Vector DB ⚡")
 
     with gr.Tabs():
         with gr.TabItem("🎤 Interview"):
-            gr.Markdown('## Step 1: Upload Resume & Job Description')
-            gr.Markdown('⚠️ **Both are required before starting!**')
+            gr.Markdown('## Step 1: Upload Materials')
 
             with gr.Row():
-                resume_input = gr.File(label="📄 Upload Resume (PDF)", type='filepath')
+                resume_input = gr.File(label="📄 Resume (PDF)", type='filepath')
                 job_desc_input = gr.Textbox(label="💼 Job Description", lines=10,
-                                            placeholder="Paste the job description here...")
+                                            placeholder="Paste job description...")
 
-            gr.Markdown('## Step 2: Configure Interview Settings')
+            gr.Markdown('## Step 2: Configure Interview')
 
             with gr.Row():
                 interview_type = gr.Dropdown(
                     choices=list(INTERVIEW_TYPES.keys()),
                     value="behavioral",
-                    label="🎭 Interview Type",
-                    info="Select the interview focus"
+                    label="🎭 Interview Type"
                 )
                 difficulty = gr.Dropdown(
                     choices=list(DIFFICULTY_LEVELS.keys()),
                     value="mid",
-                    label="📈 Difficulty Level",
-                    info="Match your experience level"
+                    label="📈 Difficulty"
                 )
 
             with gr.Row():
                 company_style = gr.Dropdown(
                     choices=list(COMPANY_STYLES.keys()),
                     value="general",
-                    label="🏢 Company Style",
-                    info="Interview approach by company type"
+                    label="🏢 Company Style"
                 )
                 practice_mode = gr.Checkbox(
-                    label="🎓 Practice Mode (with hints & real-time feedback)",
-                    value=True,
-                    info="Disable for realistic simulation"
+                    label="🎓 Practice Mode (hints + feedback)",
+                    value=True
                 )
 
-            num_q_input = gr.Slider(
-                label="❓ Number of Questions",
-                minimum=1,
-                maximum=10,
-                value=5,
-                step=1,
-                info="Total questions in this interview"
-            )
+            num_q_input = gr.Slider(1, 10, value=5, step=1, label="❓ Questions")
 
-            gr.Markdown('## Step 3: Start Interview!')
+            gr.Markdown('## Step 3: Interview')
 
-            interviewer_question = gr.Audio(label="🎙️ Interviewer Question", type="filepath")
+            interviewer_question = gr.Audio(label="🎙️ Question", type="filepath")
 
             with gr.Row():
-                user_answer = gr.Audio(
-                    sources=["microphone"],
-                    type="filepath",
-                    label="🎤 Record Your Answer (Audio)"
-                )
-                video_input = gr.Video(
-                    sources=["webcam"],
-                    label="📹 Record Yourself (Video - Optional)",
-                    include_audio=True
-                )
+                user_answer = gr.Audio(sources=["microphone"], type="filepath",
+                                       label="🎤 Your Answer")
+                video_input = gr.Video(sources=["webcam"], label="📹 Video (Optional)",
+                                       include_audio=True)
 
-            start_btn = gr.Button("▶️ Start / Submit Answer", variant="primary", size="lg")
+            start_btn = gr.Button("▶️ Start / Submit", variant="primary", size="lg")
 
-            gr.Markdown("## 📊 Performance Feedback")
-            evaluation_textbox = gr.Textbox(label="Real-time Feedback & Final Evaluation",
-                                            lines=25)
+            gr.Markdown("## 📊 Feedback & Results")
+            evaluation_textbox = gr.Textbox(label="Real-time Analysis", lines=25)
 
-            # Hidden state to pass previous question
             question_state = gr.State("")
 
 
@@ -822,8 +649,7 @@ with gr.Blocks() as demo:
                                prev_q, answer_audio, video):
                 result = next_question(resume, job, total, itype, diff, company, practice,
                                        prev_q, answer_audio, video)
-                # Extract the new question text for next iteration
-                new_question = "Question asked"  # Simplified
+                new_question = "Question asked"
                 return result + (new_question,)
 
 
@@ -832,246 +658,104 @@ with gr.Blocks() as demo:
                 inputs=[resume_input, job_desc_input, num_q_input, interview_type,
                         difficulty, company_style, practice_mode, question_state,
                         user_answer, video_input],
-                outputs=[interviewer_question, user_answer, start_btn, evaluation_textbox, question_state]
+                outputs=[interviewer_question, user_answer, start_btn,
+                         evaluation_textbox, question_state]
             )
 
         with gr.TabItem("💾 Save/Load"):
-            gr.Markdown("## Save Your Interview Progress")
-            gr.Markdown("Use this to pause and resume your interview later.")
+            gr.Markdown("## Save Progress")
+            save_btn = gr.Button("💾 Save Interview")
+            save_status = gr.Textbox(label="Status")
+            save_btn.click(fn=save_checkpoint, outputs=save_status)
 
-            save_btn = gr.Button("💾 Save Current Interview", variant="secondary")
-            save_status = gr.Textbox(label="Save Status", interactive=False)
+            gr.Markdown("## Load Interview")
+            checkpoint_file = gr.File(label="📁 Checkpoint File", type='filepath')
+            load_btn = gr.Button("📂 Load")
+            load_status = gr.Textbox(label="Status")
+            load_btn.click(fn=load_checkpoint, inputs=checkpoint_file, outputs=load_status)
 
-            save_btn.click(
-                fn=save_checkpoint,
-                outputs=save_status
-            )
-
-            gr.Markdown("## Load Previous Interview")
-            checkpoint_file = gr.File(label="📁 Upload Checkpoint File", type='filepath')
-            load_btn = gr.Button("📂 Load Interview", variant="secondary")
-            load_status = gr.Textbox(label="Load Status", interactive=False)
-
-            load_btn.click(
-                fn=load_checkpoint,
-                inputs=checkpoint_file,
-                outputs=load_status
-            )
-
-        with gr.TabItem("📚 Interview Guide"):
+        with gr.TabItem("📚 Guide"):
             gr.Markdown("""
-            ## 📖 How to Use This Interview Coach
+            ## 🎯 How It Works
 
-            ### 🎯 Interview Types
+            ### RAG-Powered Question Selection
 
-            **Behavioral**: Past experiences using STAR method (Situation, Task, Action, Result)
-            - Example: "Tell me about a time you faced a conflict with a team member"
+            This system uses **Retrieval Augmented Generation (RAG)** to select the most relevant 
+            interview questions for you:
 
-            **Technical**: Technical skills and problem-solving
-            - Example: "How would you design a scalable database system?"
+            1. **Vector Database**: 80+ questions stored with embeddings
+            2. **Smart Matching**: Questions selected based on:
+               - Your resume skills
+               - Job requirements
+               - Interview type & difficulty
+               - Company interview style
+            3. **Chroma DB**: Free, local vector database (no API key needed)
+            4. **HuggingFace Embeddings**: Free embeddings running locally
 
-            **Leadership**: Management and decision-making
-            - Example: "Describe your leadership style and how you motivate teams"
+            ### Question Bank Categories
 
-            **Case Study**: Business problem-solving
-            - Example: "Our client's revenue dropped 20%. What would you investigate?"
+            - **Behavioral**: STAR method, past experiences
+            - **Technical**: ML, data science, system design
+            - **Leadership**: Management, decision-making
+            - **Case Study**: Business problems, analytics
+            - **Company-Specific**: Amazon LP, Google-style, etc.
 
-            ### 📈 Difficulty Levels
+            ### Benefits of RAG
 
-            - **Junior**: Entry-level (0-2 years) - Foundational knowledge
-            - **Mid**: Intermediate (3-5 years) - Practical experience
-            - **Senior**: Advanced (5+ years) - Strategic thinking & leadership
+            ✅ Personalized questions matching YOUR background
+            ✅ Relevant to the SPECIFIC job you're applying for
+            ✅ No generic questions
+            ✅ Adaptive difficulty
+            ✅ 100% free (no API costs)
 
-            ### 🏢 Company Styles
+            ### Tips
 
-            - **Google**: Innovation, scalability, algorithmic thinking
-            - **Amazon**: Leadership principles, ownership, customer focus
-            - **Microsoft**: Collaboration, growth mindset, technical depth
-            - **Meta**: Impact, moving fast, bold ideas
-            - **Consulting**: Case studies, frameworks, structured thinking
-            - **Startup**: Versatility, ownership, resourcefulness
-
-            ### 🎓 Practice vs Real Mode
-
-            **Practice Mode** (Recommended for learning):
-            - ✅ Get hints with questions
-            - ✅ Real-time feedback after each answer
-            - ✅ Speech quality analysis
-            - ✅ Emotion detection
-            - ✅ See improvement suggestions
-
-            **Real Mode** (For final prep):
-            - ❌ No hints
-            - ❌ No real-time feedback (only final evaluation)
-            - ✅ Realistic interview pressure
-            - ✅ Timed experience
-
-            ### 💡 Tips for Great Answers
-
-            1. **Structure**: Use STAR method for behavioral questions
-            2. **Specificity**: Give concrete examples with metrics
-            3. **Clarity**: Speak clearly at 120-150 words per minute
-            4. **Brevity**: Keep answers 1-2 minutes (150-300 words)
-            5. **Confidence**: Minimize filler words (um, uh, like)
-            6. **Honesty**: Be genuine about challenges and learnings
-
-            ### 🎤 Recording Tips
-
-            - Ensure quiet environment
-            - Speak clearly into microphone
-            - Take a breath before answering
-            - Look at camera if using video
-            - Smile and show enthusiasm
-            """)
-
-        with gr.TabItem("📊 Performance Metrics"):
-            gr.Markdown("""
-            ## 🎯 Understanding Your Scores
-
-            ### Score Breakdown (0-10 scale)
-
-            **Technical Skills** (0-10)
-            - 9-10: Expert level, comprehensive knowledge
-            - 7-8: Strong competency, minor gaps
-            - 5-6: Adequate, needs development
-            - 0-4: Significant improvement needed
-
-            **Communication** (0-10)
-            - Clarity of expression
-            - Structure of answers
-            - Use of examples
-            - Listening and responding appropriately
-
-            **Problem Solving** (0-10)
-            - Analytical thinking
-            - Approach to challenges
-            - Creativity in solutions
-            - Logical reasoning
-
-            **Cultural Fit** (0-10)
-            - Alignment with company values
-            - Team collaboration indicators
-            - Work style compatibility
-            - Growth mindset
-
-            **Experience Relevance** (0-10)
-            - How well past experience matches role
-            - Transferable skills demonstrated
-            - Career progression logic
-            - Industry knowledge
-
-            ### 🎤 Speech Quality Metrics
-
-            **Words Per Minute**:
-            - Too Slow: < 100 wpm (shows lack of preparation)
-            - Optimal: 120-160 wpm (clear and confident)
-            - Too Fast: > 180 wpm (hard to follow)
-
-            **Filler Words**: Aim for < 5 per answer
-            - Um, uh, like, you know, basically
-            - Shows nervousness or lack of preparation
-            - Practice reduces filler usage
-
-            **Answer Length**:
-            - Too Short: < 100 words (insufficient detail)
-            - Optimal: 150-300 words (comprehensive)
-            - Too Long: > 400 words (rambling)
-
-            ### 😊 Emotion Analysis
-
-            The system detects:
-            - **Joy/Enthusiasm**: Shows passion (positive)
-            - **Confidence**: Indicated by tone and word choice
-            - **Fear/Anxiety**: May indicate nervousness
-            - **Neutral**: Professional demeanor
-
-            ### 📈 Improvement Over Time
-
-            Track your progress:
-            1. Save each interview
-            2. Compare scores across sessions
-            3. Focus on lowest scoring areas
-            4. Repeat same difficulty to see improvement
-            5. Gradually increase difficulty level
+            1. Upload detailed resume for better matching
+            2. Paste complete job description
+            3. Practice mode shows hints from question bank
+            4. Questions are selected before interview starts
+            5. Each interview gets fresh question selection
             """)
 
         with gr.TabItem("ℹ️ About"):
             gr.Markdown("""
-            ## 🚀 Advanced AI Interview Coach
+            ## 🚀 Technology Stack
+
+            ### AI & ML
+            - **LLM**: Groq (Llama 3.3-70B) - Fast inference
+            - **RAG**: LangChain + Chroma - Question retrieval
+            - **Embeddings**: HuggingFace (all-MiniLM-L6-v2) - Free
+            - **Speech**: Faster Whisper + gTTS
+            - **Emotion**: Transformers (DistilBERT)
+
+            ### Vector Database
+            - **Chroma**: Local vector store (no cloud needed)
+            - **80+ Questions**: Pre-embedded and indexed
+            - **Similarity Search**: Finds most relevant questions
+            - **Metadata Filtering**: By type, difficulty, skills
 
             ### Features
 
-            ✅ **5 Specialized AI Agents**
-            - Resume Analyst
-            - Job Description Expert
-            - Interview Strategist
-            - Interviewer
-            - Evaluator
-
-            ✅ **Multiple Interview Types**
-            - Behavioral (STAR method)
-            - Technical (Problem-solving)
-            - Leadership (Management)
-            - Case Study (Business analysis)
-
-            ✅ **Adaptive Difficulty**
-            - Junior (Entry-level)
-            - Mid (Intermediate)
-            - Senior (Advanced)
-
-            ✅ **Company-Specific Styles**
-            - FAANG (Google, Amazon, Meta, Microsoft)
-            - Consulting
-            - Startup
-            - General Corporate
-
-            ✅ **Real-Time Analysis**
-            - Speech quality (pace, fillers, clarity)
-            - Emotion detection (confidence, sentiment)
-            - Immediate feedback (practice mode)
-            - Numerical scoring
-
-            ✅ **Practice & Real Modes**
-            - Practice: Learn with hints and feedback
-            - Real: Simulate actual interview pressure
-
-            ✅ **Save/Resume Functionality**
-            - Pause interviews anytime
-            - Resume from checkpoints
-            - Export complete history
-
-            ✅ **Video Recording**
-            - Optional video capture
-            - Better audio quality
-            - Self-review capability
-
-            ### Technology Stack
-
-            - **LLM**: Groq (Llama 3.3-70B)
-            - **Speech-to-Text**: Faster Whisper
-            - **Text-to-Speech**: Google TTS
-            - **Emotion Analysis**: Hugging Face Transformers
-            - **UI Framework**: Gradio
-            - **PDF Processing**: PyPDF2
-
-            ### Credits
-
-            Built with ❤️ using open-source AI technologies
+            ✅ RAG-powered question selection
+            ✅ Multi-agent AI system
+            ✅ Real-time speech analysis
+            ✅ Emotion detection
+            ✅ Practice & real modes
+            ✅ Save/resume functionality
+            ✅ 100% free to use
 
             ### Version
-            v2.0 - Advanced Edition with Multi-Modal Analysis
+            v3.0 - RAG Edition
 
-            ### Support
-
-            For issues or questions, check your saved interview files in:
-            - `checkpoints/` - Saved progress
-            - `interview_history/` - Completed interviews
+            ### Cost
+            **$0** - Everything runs locally except Groq API (free tier)
             """)
 
 if __name__ == "__main__":
-    print("🚀 Starting Advanced Interview Coach...")
-    print("📁 Creating necessary directories...")
+    print("🚀 Starting AI Interview Coach with RAG...")
+    print("📁 Creating directories...")
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("interview_history", exist_ok=True)
-    print("✅ Ready! Opening browser...")
+    os.makedirs("chroma_db", exist_ok=True)
+    print("✅ Ready!")
     demo.launch(share=True)

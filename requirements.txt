@@ -4,3 +4,8 @@ groq~=1.0.0
 gTTS~=2.5.4
 faster-whisper~=1.2.1
 transformers~=4.57.3
+langchain==0.3.7
+langchain-community==0.3.7
+langchain-huggingface==0.1.2
+langgraph==0.2.45
+chromadb==0.5.23
